@@ -12,15 +12,21 @@ builder.Services.AddSwaggerGen();
 
 //builder.Services.AddApplicationInsightsTelemetry();
 
+var ordersDbConnectionString =
+    builder.Configuration.GetConnectionString("OrdersDb")
+    ?? throw new InvalidOperationException(
+        "Connection string 'OrdersDb' was not found.");
+
 builder.Services.AddDbContext<OrdersDbContext>(options =>
-{
-    var connectionString = builder.Configuration.GetConnectionString("OrdersDb");
-
-    if (string.IsNullOrWhiteSpace(connectionString))
-        throw new InvalidOperationException("OrdersDb connection string is missing.");
-
-    options.UseSqlServer(connectionString);
-});
+    options.UseSqlServer(
+        ordersDbConnectionString,
+        sqlOptions =>
+        {
+            sqlOptions.EnableRetryOnFailure(
+                maxRetryCount: 6,
+                maxRetryDelay: TimeSpan.FromSeconds(20),
+                errorNumbersToAdd: null);
+        }));
 
 var serviceBusConnectionString = builder.Configuration["ServiceBus:ConnectionString"];
 
