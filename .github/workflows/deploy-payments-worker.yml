@@ -1,0 +1,61 @@
+name: Build and deploy Payments Worker
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "Payments.Worker/**"
+      - ".dockerignore"
+      - ".github/workflows/deploy-payments-worker.yml"
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Login to Azure
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZUREAPPSERVICE_CLIENTID_9DC6658A885141D68FD364980F302742 }}
+          tenant-id: ${{ secrets.AZUREAPPSERVICE_TENANTID_715D3A41B0114D4D95F57EB54532E958 }}
+          subscription-id: ${{ secrets.AZUREAPPSERVICE_SUBSCRIPTIONID_D50235F09A4D4958A81F423B51302996 }}
+
+      - name: Get ACR login server
+        run: |
+          echo "ACR_LOGIN_SERVER=$(az acr show \
+            --name acrorderprocessingmn01 \
+            --query loginServer \
+            --output tsv)" >> "$GITHUB_ENV"
+
+      - name: Login to Azure Container Registry
+        run: az acr login --name acrorderprocessingmn01
+
+      - name: Build Docker image
+        run: |
+          docker build \
+            --file ./Payments.Worker/Dockerfile \
+            --tag "$ACR_LOGIN_SERVER/payments-worker:${GITHUB_SHA}" \
+            .
+
+      - name: Push Docker image
+        run: |
+          docker push "$ACR_LOGIN_SERVER/payments-worker:${GITHUB_SHA}"
+
+      - name: Install Container Apps CLI extension
+        run: az extension add --name containerapp --upgrade
+
+      - name: Deploy Payments Worker
+        run: |
+          az containerapp update \
+            --name payments-worker \
+            --resource-group rg-usingasure-demo \
+            --image "$ACR_LOGIN_SERVER/payments-worker:${GITHUB_SHA}"
