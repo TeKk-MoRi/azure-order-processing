@@ -1,16 +1,22 @@
-# Docs for the Azure Web Apps Deploy action: https://github.com/Azure/webapps-deploy
-# More GitHub Actions for Azure: https://github.com/Azure/actions
-
-name: Build and deploy ASP.Net Core app to Azure Web App - orders-api-morteza01
+name: Build and deploy Orders API
 
 on:
   push:
     branches:
       - main
+    paths:
+      - "Orders.Api/**"
+      - ".github/workflows/main_orders-api-morteza01.yml"
+
   workflow_dispatch:
+
+concurrency:
+  group: orders-api-production
+  cancel-in-progress: true
 
 jobs:
   build:
+    name: Build Orders API
     runs-on: ubuntu-latest
 
     permissions:
@@ -29,30 +35,42 @@ jobs:
         run: dotnet restore ./Orders.Api/Orders.Api.csproj
 
       - name: Build Orders API
-        run: dotnet build ./Orders.Api/Orders.Api.csproj --configuration Release --no-restore
+        run: >
+          dotnet build
+          ./Orders.Api/Orders.Api.csproj
+          --configuration Release
+          --no-restore
 
       - name: Publish Orders API
-        run: dotnet publish ./Orders.Api/Orders.Api.csproj --configuration Release --output ${{ env.DOTNET_ROOT }}/myapp --no-build
+        run: >
+          dotnet publish
+          ./Orders.Api/Orders.Api.csproj
+          --configuration Release
+          --output ./publish
+          --no-build
 
       - name: Upload deployment artifact
         uses: actions/upload-artifact@v4
         with:
-          name: .net-app
-          path: ${{ env.DOTNET_ROOT }}/myapp
+          name: orders-api-app
+          path: ./publish
+          if-no-files-found: error
 
   deploy:
+    name: Deploy Orders API
     runs-on: ubuntu-latest
     needs: build
 
     permissions:
-      id-token: write
       contents: read
+      id-token: write
 
     steps:
       - name: Download deployment artifact
         uses: actions/download-artifact@v4
         with:
-          name: .net-app
+          name: orders-api-app
+          path: ./artifact
 
       - name: Login to Azure
         uses: azure/login@v2
@@ -66,4 +84,4 @@ jobs:
         with:
           app-name: orders-api-morteza01
           slot-name: Production
-          package: .
+          package: ./artifact

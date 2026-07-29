@@ -1,76 +1,38 @@
-name: Build and deploy Orders API
+name: Build and deploy Payments Worker
 
 on:
   push:
     branches:
       - main
     paths:
-      - "Orders.Api/**"
-      - ".github/workflows/main_orders-api-morteza01.yml"
+      - "Payments.Worker/**"
+      - ".dockerignore"
+      - ".github/workflows/deploy-payments-worker.yml"
 
   workflow_dispatch:
 
+permissions:
+  contents: read
+  id-token: write
+
 concurrency:
-  group: orders-api-production
+  group: payments-worker-production
   cancel-in-progress: true
 
-jobs:
-  build:
-    name: Build Orders API
-    runs-on: ubuntu-latest
+env:
+  ACR_NAME: acrorderprocessingmn01
+  RESOURCE_GROUP: rg-usingasure-demo
+  CONTAINER_APP_NAME: payments-worker
+  IMAGE_REPOSITORY: payments-worker
 
-    permissions:
-      contents: read
+jobs:
+  build-and-deploy:
+    name: Build and deploy Payments Worker
+    runs-on: ubuntu-latest
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-
-      - name: Set up .NET 10
-        uses: actions/setup-dotnet@v4
-        with:
-          dotnet-version: "10.x"
-
-      - name: Restore Orders API
-        run: dotnet restore ./Orders.Api/Orders.Api.csproj
-
-      - name: Build Orders API
-        run: >
-          dotnet build
-          ./Orders.Api/Orders.Api.csproj
-          --configuration Release
-          --no-restore
-
-      - name: Publish Orders API
-        run: >
-          dotnet publish
-          ./Orders.Api/Orders.Api.csproj
-          --configuration Release
-          --output ./publish
-          --no-build
-
-      - name: Upload deployment artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: orders-api-app
-          path: ./publish
-          if-no-files-found: error
-
-  deploy:
-    name: Deploy Orders API
-    runs-on: ubuntu-latest
-    needs: build
-
-    permissions:
-      contents: read
-      id-token: write
-
-    steps:
-      - name: Download deployment artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: orders-api-app
-          path: ./artifact
 
       - name: Login to Azure
         uses: azure/login@v2
@@ -79,9 +41,74 @@ jobs:
           tenant-id: ${{ secrets.AZUREAPPSERVICE_TENANTID_715D3A41B0114D4D95F57EB54532E958 }}
           subscription-id: ${{ secrets.AZUREAPPSERVICE_SUBSCRIPTIONID_D50235F09A4D4958A81F423B51302996 }}
 
-      - name: Deploy Orders API to Azure App Service
-        uses: azure/webapps-deploy@v3
-        with:
-          app-name: orders-api-morteza01
-          slot-name: Production
-          package: ./artifact
+      - name: Get ACR login server
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          ACR_LOGIN_SERVER=$(az acr show \
+            --name "$ACR_NAME" \
+            --resource-group "$RESOURCE_GROUP" \
+            --query loginServer \
+            --output tsv)
+
+          test -n "$ACR_LOGIN_SERVER"
+
+          echo "ACR_LOGIN_SERVER=$ACR_LOGIN_SERVER" >> "$GITHUB_ENV"
+          echo "IMAGE_NAME=$ACR_LOGIN_SERVER/$IMAGE_REPOSITORY:$GITHUB_SHA" >> "$GITHUB_ENV"
+
+      - name: Login to Azure Container Registry
+        shell: bash
+        run: |
+          set -euo pipefail
+          az acr login --name "$ACR_NAME"
+
+      - name: Build Docker image
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          docker build \
+            --file ./Payments.Worker/Dockerfile \
+            --tag "$IMAGE_NAME" \
+            .
+
+      - name: Push Docker image
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker push "$IMAGE_NAME"
+
+      - name: Install Azure Container Apps CLI extension
+        shell: bash
+        run: |
+          set -euo pipefail
+          az extension add --name containerapp --upgrade
+
+      - name: Deploy Payments Worker
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          az containerapp update \
+            --name "$CONTAINER_APP_NAME" \
+            --resource-group "$RESOURCE_GROUP" \
+            --image "$IMAGE_NAME" \
+            --output none
+
+      - name: Verify deployment
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          LATEST_REVISION=$(az containerapp show \
+            --name "$CONTAINER_APP_NAME" \
+            --resource-group "$RESOURCE_GROUP" \
+            --query properties.latestRevisionName \
+            --output tsv)
+
+          test -n "$LATEST_REVISION"
+
+          echo "Deployment completed successfully."
+          echo "Image: $IMAGE_NAME"
+          echo "Latest revision: $LATEST_REVISION"
