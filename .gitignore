@@ -74,6 +74,24 @@ ScaffoldingReadMe.txt
 # StyleCop
 StyleCopReport.xml
 
+# Terraform working directory
+**/.terraform/*
+
+# Terraform state
+*.tfstate
+*.tfstate.*
+
+# Local variable values
+*.tfvars
+*.tfvars.json
+
+# Saved plan files
+*.tfplan
+
+# Terraform crash logs
+crash.log
+crash.*.log
+
 # Files built by Visual Studio
 *_i.c
 *_p.c

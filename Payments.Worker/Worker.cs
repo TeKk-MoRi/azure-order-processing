@@ -5,97 +5,105 @@ namespace Payments.Worker;
 public sealed class Worker : BackgroundService
 {
     private readonly ILogger<Worker> _logger;
-    private readonly IConfiguration _configuration;
-
-    private ServiceBusClient? _client;
-    private ServiceBusProcessor? _processor;
+    private readonly ServiceBusProcessor _processor;
 
     public Worker(
         ILogger<Worker> logger,
-        IConfiguration configuration)
+        ServiceBusProcessor processor)
     {
         _logger = logger;
-        _configuration = configuration;
+        _processor = processor;
     }
 
-    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
+    protected override async Task ExecuteAsync(
+        CancellationToken stoppingToken)
     {
-        var connectionString = _configuration["ServiceBus:ConnectionString"];
-        var queueName = _configuration["ServiceBus:QueueName"];
-
-        if (string.IsNullOrWhiteSpace(connectionString) || string.IsNullOrWhiteSpace(queueName))
-        {
-            _logger.LogWarning("Service Bus is not configured. Worker is running but not consuming messages.");
-
-            while (!stoppingToken.IsCancellationRequested)
-            {
-                await Task.Delay(TimeSpan.FromSeconds(10), stoppingToken);
-            }
-
-            return;
-        }
-
-        _client = new ServiceBusClient(connectionString);
-
-        _processor = _client.CreateProcessor(queueName, new ServiceBusProcessorOptions
-        {
-            AutoCompleteMessages = false,
-            MaxConcurrentCalls = 1
-        });
-
         _processor.ProcessMessageAsync += ProcessMessageAsync;
         _processor.ProcessErrorAsync += ProcessErrorAsync;
 
-        await _processor.StartProcessingAsync(stoppingToken);
+        var processingStarted = false;
 
-        _logger.LogInformation("Payments.Worker started listening to queue {QueueName}", queueName);
-
-        while (!stoppingToken.IsCancellationRequested)
+        try
         {
-            await Task.Delay(TimeSpan.FromSeconds(10), stoppingToken);
+            await _processor.StartProcessingAsync(stoppingToken);
+
+            processingStarted = true;
+
+            _logger.LogInformation(
+                "Payments.Worker started listening to Service Bus.");
+
+            await WaitUntilStoppedAsync(stoppingToken);
+        }
+        finally
+        {
+            if (processingStarted)
+            {
+                await _processor.StopProcessingAsync(
+                    CancellationToken.None);
+            }
+
+            _processor.ProcessMessageAsync -= ProcessMessageAsync;
+            _processor.ProcessErrorAsync -= ProcessErrorAsync;
+
+            _logger.LogInformation(
+                "Payments.Worker stopped listening to Service Bus.");
         }
     }
 
-    private async Task ProcessMessageAsync(ProcessMessageEventArgs args)
+    private async Task ProcessMessageAsync(
+        ProcessMessageEventArgs args)
     {
-        var body = args.Message.Body.ToString();
+        var messageBody = args.Message.Body.ToString();
 
-        _logger.LogInformation("Received OrderCreated message: {MessageBody}", body);
+        _logger.LogInformation(
+            "Received OrderCreated message. " +
+            "MessageId: {MessageId}, Body: {MessageBody}",
+            args.Message.MessageId,
+            messageBody);
 
-        // Simulate payment processing
-        await Task.Delay(TimeSpan.FromSeconds(1));
+        // Simulate payment processing.
+        await Task.Delay(
+            TimeSpan.FromSeconds(1),
+            args.CancellationToken);
 
         _logger.LogInformation(
             "Payment processed successfully. MessageId: {MessageId}",
             args.Message.MessageId);
 
-        await args.CompleteMessageAsync(args.Message);
+        await args.CompleteMessageAsync(
+            args.Message,
+            args.CancellationToken);
     }
 
-    private Task ProcessErrorAsync(ProcessErrorEventArgs args)
+    private Task ProcessErrorAsync(
+        ProcessErrorEventArgs args)
     {
         _logger.LogError(
             args.Exception,
-            "Service Bus error. Entity: {EntityPath}, ErrorSource: {ErrorSource}",
+            "Service Bus error. " +
+            "Namespace: {FullyQualifiedNamespace}, " +
+            "Entity: {EntityPath}, " +
+            "ErrorSource: {ErrorSource}",
+            args.FullyQualifiedNamespace,
             args.EntityPath,
             args.ErrorSource);
 
         return Task.CompletedTask;
     }
 
-    public override async Task StopAsync(CancellationToken cancellationToken)
+    private static async Task WaitUntilStoppedAsync(
+        CancellationToken stoppingToken)
     {
-        if (_processor is not null)
+        try
         {
-            await _processor.StopProcessingAsync(cancellationToken);
-            await _processor.DisposeAsync();
+            await Task.Delay(
+                Timeout.InfiniteTimeSpan,
+                stoppingToken);
         }
-
-        if (_client is not null)
+        catch (OperationCanceledException)
+            when (stoppingToken.IsCancellationRequested)
         {
-            await _client.DisposeAsync();
+            // Expected when the application is shutting down.
         }
-
-        await base.StopAsync(cancellationToken);
     }
 }

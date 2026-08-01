@@ -1,8 +1,9 @@
+using Azure.Core;
+using Azure.Identity;
+using Azure.Messaging.ServiceBus;
 using Microsoft.EntityFrameworkCore;
 using Orders.Api.Contracts;
 using Orders.Api.Data;
-using System.Text.Json;
-using Azure.Messaging.ServiceBus;
 using Orders.Api.Models;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -10,7 +11,8 @@ var builder = WebApplication.CreateBuilder(args);
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
 
-//builder.Services.AddApplicationInsightsTelemetry();
+// We will enable this later.
+// builder.Services.AddApplicationInsightsTelemetry();
 
 var ordersDbConnectionString =
     builder.Configuration.GetConnectionString("OrdersDb")
@@ -28,12 +30,56 @@ builder.Services.AddDbContext<OrdersDbContext>(options =>
                 errorNumbersToAdd: null);
         }));
 
-var serviceBusConnectionString = builder.Configuration["ServiceBus:ConnectionString"];
+var fullyQualifiedNamespace =
+    builder.Configuration["ServiceBus:FullyQualifiedNamespace"]
+    ?? throw new InvalidOperationException(
+        "ServiceBus:FullyQualifiedNamespace is missing.");
 
-if (!string.IsNullOrWhiteSpace(serviceBusConnectionString))
+var queueName =
+    builder.Configuration["ServiceBus:QueueName"]
+    ?? throw new InvalidOperationException(
+        "ServiceBus:QueueName is missing.");
+
+TokenCredential serviceBusCredential;
+
+if (builder.Environment.IsDevelopment())
 {
-    builder.Services.AddSingleton(new ServiceBusClient(serviceBusConnectionString));
+    var tenantId =
+        builder.Configuration["Azure:TenantId"]
+        ?? throw new InvalidOperationException(
+            "Azure:TenantId is missing in Development.");
+
+    // Local development:
+    // opens the browser and authenticates your Azure user.
+    serviceBusCredential = new InteractiveBrowserCredential(
+        new InteractiveBrowserCredentialOptions
+        {
+            TenantId = tenantId
+        });
 }
+else
+{
+    // Azure:
+    // uses the system-assigned managed identity of Orders.Api.
+    serviceBusCredential =
+        new ManagedIdentityCredential(
+            ManagedIdentityId.SystemAssigned);
+}
+
+// The DI container creates and disposes this singleton.
+builder.Services.AddSingleton(_ =>
+    new ServiceBusClient(
+        fullyQualifiedNamespace,
+        serviceBusCredential));
+
+// The sender shares the ServiceBusClient's AMQP connection.
+builder.Services.AddSingleton(serviceProvider =>
+{
+    var serviceBusClient =
+        serviceProvider.GetRequiredService<ServiceBusClient>();
+
+    return serviceBusClient.CreateSender(queueName);
+});
 
 var app = builder.Build();
 
@@ -47,7 +93,7 @@ app.MapGet("/health", () =>
     return Results.Ok(new
     {
         status = "Healthy",
-        service = "Orders.Api API",
+        service = "Orders.Api",
         time = DateTime.UtcNow
     });
 });
@@ -55,12 +101,13 @@ app.MapGet("/health", () =>
 app.MapPost("/orders", async (
     CreateOrderRequest request,
     OrdersDbContext dbContext,
-    IServiceProvider serviceProvider,
-    IConfiguration configuration,
+    ServiceBusSender serviceBusSender,
     ILogger<Program> logger,
     CancellationToken cancellationToken) =>
 {
-    var order = Order.Create(request.CustomerName, request.Amount);
+    var order = Order.Create(
+        request.CustomerName,
+        request.Amount);
 
     dbContext.Orders.Add(order);
 
@@ -72,40 +119,32 @@ app.MapPost("/orders", async (
         order.Amount,
         order.CreatedAtUtc);
 
-    var serviceBusClient = serviceProvider.GetService<ServiceBusClient>();
-
-    if (serviceBusClient is not null)
-    {
-        var queueName = configuration["ServiceBus:QueueName"];
-
-        if (string.IsNullOrWhiteSpace(queueName))
-            throw new InvalidOperationException("ServiceBus queue name is missing.");
-
-        var sender = serviceBusClient.CreateSender(queueName);
-
-        var serviceBusMessage = new ServiceBusMessage(JsonSerializer.Serialize(message))
+    var serviceBusMessage =
+        new ServiceBusMessage(
+            BinaryData.FromObjectAsJson(message))
         {
             ContentType = "application/json",
             Subject = "OrderCreated",
             MessageId = order.Id.ToString()
         };
 
-        await sender.SendMessageAsync(serviceBusMessage, cancellationToken);
+    await serviceBusSender.SendMessageAsync(
+        serviceBusMessage,
+        cancellationToken);
 
-        logger.LogInformation("OrderCreated message sent for OrderId {OrderId}", order.Id);
-    }
-    else
-    {
-        logger.LogWarning("Service Bus is not configured. OrderCreated message was not sent.");
-    }
+    logger.LogInformation(
+        "OrderCreated message sent for OrderId {OrderId}",
+        order.Id);
 
-    return Results.Created($"/orders/{order.Id}", new
-    {
-        order.Id,
-        order.CustomerName,
-        order.Amount,
-        order.CreatedAtUtc
-    });
+    return Results.Created(
+        $"/orders/{order.Id}",
+        new
+        {
+            order.Id,
+            order.CustomerName,
+            order.Amount,
+            order.CreatedAtUtc
+        });
 });
 
 app.MapGet("/orders/{id:guid}", async (
@@ -115,7 +154,9 @@ app.MapGet("/orders/{id:guid}", async (
 {
     var order = await dbContext.Orders
         .AsNoTracking()
-        .FirstOrDefaultAsync(x => x.Id == id, cancellationToken);
+        .FirstOrDefaultAsync(
+            order => order.Id == id,
+            cancellationToken);
 
     return order is null
         ? Results.NotFound()
